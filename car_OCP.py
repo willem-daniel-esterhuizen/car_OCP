@@ -3,7 +3,7 @@ from matplotlib.ticker import MaxNLocator
 import numpy as np
 from casadi import *
 
-def solve_OCP(x_hat, K, h):
+def solve_OCP(x_hat, x_target, obstacles, K, h):
     n = 3 # state dimension
     m = 2 # control dimension
 
@@ -11,17 +11,20 @@ def solve_OCP(x_hat, K, h):
 
     # Constraints for all k
     u1_max = 1
+    u1_min = -1
+    u2_max = 1
+    u2_min = -1
     x1_max = 100
     x1_min = -100
     x2_max = 100
     x2_min = -100   
 
-    # Linear cost matrices
-    Q = np.array([[1, 0, 0],
-                  [0, 1, 0],
-                  [0, 0, 0]])
-    R = np.array([[1, 0], [0, 1]])
-    Q_K = Q
+    # # Linear cost matrices
+    # Q = np.array([[1, 0, 0],
+    #               [0, 1, 0],
+    #               [0, 0, 0]])
+    # R = np.array([[1, 0], [0, 1]])
+    # Q_K = Q
 
     opti = Opti()
     x_tot = opti.variable(n, no_steps+1)  # State trajectory
@@ -32,21 +35,39 @@ def solve_OCP(x_hat, K, h):
 
     cost = 0
     for k in range(no_steps):
+
+        # add to the cost
+        # cost += (x_tot[0, k] - x_target[0])**4 + (x_tot[1, k] - x_target[1])**2 + (x_tot[2, k] - x_target[2])**4 + (u_tot[0, k])**4 + (u_tot[1, k])**4
+        # cost += mtimes([x_tot[:,k].T, Q, x_tot[:,k]]) + mtimes([u_tot[:,k].T, R, u_tot[:,k]])
+        # cost += mtimes([u_tot[:,k].T, R, u_tot[:,k]])
+        for obstacle in obstacles:
+            opti.subject_to((x_tot[0, k] - obstacle['centre'][0])**2 + (x_tot[1, k] - obstacle['centre'][1])**2 >= obstacle['radius']**2)
+
+        # opti.subject_to(x_tot[0, k]**2 + x_tot[1, k]**2 >= 0.5)
         # add dynamic constraints
+
+        cost += sqrt( (x_tot[0, k+1] - x_tot[0, k])**2 + (x_tot[1, k+1] - x_tot[1, k])**2 + 1e-2) # minimuse arc length
         x_tot_next = get_x_next(x_tot[:, k], u_tot[:, k], h)
         opti.subject_to(x_tot[:, k+1] == x_tot_next)
 
-        # add to the cost
-        cost += mtimes([x_tot[:,k].T, Q, x_tot[:,k]]) + mtimes([u_tot[:,k].T, R, u_tot[:,k]])
-
-    cost += mtimes([x_tot[:,K].T, Q_K, x_tot[:,K]])
+    cost += (x_tot[0, -1] - x_target[0, -1])**2 + (x_tot[1, -1] - x_target[1, -1])**2 # + (x_tot[2, k] - x_target[2, -1])**2
+    # cost = (x_tot[0,K])**2 + (x_tot[1,K])**2
 
     # constraints for every time step
-    opti.subject_to(opti.bounded(-u1_max, u_tot[0,:], u1_max))
-    opti.subject_to(opti.bounded(x1_min, x_tot[0,:], x1_max))
-    opti.subject_to(opti.bounded(x2_min, x_tot[1,:], x2_max))
+    opti.subject_to(opti.bounded(u1_min, u_tot[0,:], u1_max))
+    opti.subject_to(opti.bounded(u2_min, u_tot[1,:], u2_max))
+    # opti.subject_to(opti.bounded(x1_min, x_tot[0,:], x1_max))
+    # opti.subject_to(opti.bounded(x2_min, x_tot[1,:], x2_max))
 
-    opts = {"ipopt.print_level": 0, "print_time": 0}
+    opts = {"ipopt.print_level": 5, "print_time": 0}
+    # opts = {
+    #     "ipopt.print_level": 5,
+    #     "ipopt.tol": 1e-10,  # Tighter tolerance for precision
+    #     "ipopt.mu_strategy": "adaptive",  # Better barrier handling
+    #     "ipopt.hessian_approximation": "limited-memory",  # For large problems
+    #     "ipopt.bound_relax_factor": 1e-6,  # Slight bound relaxation
+    #     "expand": True
+    # }
     opti.minimize(cost)
     opti.solver("ipopt", opts)
     
@@ -65,14 +86,18 @@ def f(x,u):
                    u[0]*sin(x[2]),
                    u[1])
 
-def get_x_next(x, u, h):
-    # RK4 step for car
-    k1 = f(x,u)
-    k2 = f(x + h*(k1/2), u)
-    k3 = f(x + h*(k2/2), u)
-    k4 = f(x + h*k3, u)
+# def get_x_next(x, u, h):
+#     # RK4 step for car
+#     k1 = f(x,u)
+#     k2 = f(x + h*(k1/2), u)
+#     k3 = f(x + h*(k2/2), u)
+#     k4 = f(x + h*k3, u)
 
-    return x + (h/6)*(k1 + 2*k2 + 2*k3 + k4)
+#     return x + (h/6)*(k1 + 2*k2 + 2*k3 + k4)
+
+def get_x_next(x, u, h):
+    # Euler
+    return x + h*f(x,u)
 
 def plot_constraints(ax, x_1_max, x_1_min, x2_init_min, x2_init_max):
     ax.plot([x_1_min, x_1_min], [x2_init_min, x2_init_max], 'k-')
@@ -92,7 +117,7 @@ def plot_solution_hold_on(ax, x_tot):
     ax.set_ylabel('Velocity')
     ax.grid(True)
 
-def plot_solution(x_tot, u_tot):
+def plot_solution(x_tot, u_tot, obstacles):
     # this takes lists of numpy arrays...
     fig = plt.figure(figsize=(10, 8))
     gs = fig.add_gridspec(5, 1)
@@ -160,6 +185,13 @@ def plot_solution(x_tot, u_tot):
 
     # Plot the initial and final states
     ax6.plot([x1[0], x1[-1]], [x2[0], x2[-1]], 'k.')
+
+    # Plot the obstacles
+    theta = np.linspace(0, 2*np.pi, 50)
+    for obstacle in obstacles:
+        x = obstacle['centre'][0] + obstacle['radius'] * np.cos(theta)
+        y = obstacle['centre'][1] + obstacle['radius'] * np.sin(theta)
+        ax6.plot(x, y, 'k-')
 
     plt.tight_layout()
     # plt.savefig("ocp-open-loop.svg", format="svg")
