@@ -14,50 +14,35 @@ def solve_OCP(x_hat, x_target, obstacles, K, h):
     u1_min = -1
     u2_max = 1
     u2_min = -1
-    x1_max = 100
-    x1_min = -100
-    x2_max = 100
-    x2_min = -100   
-
-    # # Linear cost matrices
-    # Q = np.array([[1, 0, 0],
-    #               [0, 1, 0],
-    #               [0, 0, 0]])
-    # R = np.array([[1, 0], [0, 1]])
-    # Q_K = Q
 
     opti = Opti()
-    x_tot = opti.variable(n, no_steps+1)  # State trajectory
-    u_tot = opti.variable(m, no_steps)    # Control trajectory
+    x = opti.variable(n, no_steps+1)  # State trajectory
+    u = opti.variable(m, no_steps)    # Control trajectory
+    # z = opti.variable(1, no_steps)
 
     # Specify the initial condition
-    opti.subject_to(x_tot[:, 0] == x_hat)
+    opti.subject_to(x[:, 0] == x_hat)
 
     cost = 0
     for k in range(no_steps):
-
-        # add to the cost
-        # cost += (x_tot[0, k] - x_target[0])**4 + (x_tot[1, k] - x_target[1])**2 + (x_tot[2, k] - x_target[2])**4 + (u_tot[0, k])**4 + (u_tot[1, k])**4
-        # cost += mtimes([x_tot[:,k].T, Q, x_tot[:,k]]) + mtimes([u_tot[:,k].T, R, u_tot[:,k]])
-        # cost += mtimes([u_tot[:,k].T, R, u_tot[:,k]])
         for obstacle in obstacles:
-            opti.subject_to((x_tot[0, k] - obstacle['centre'][0])**2 + (x_tot[1, k] - obstacle['centre'][1])**2 >= obstacle['radius']**2)
+            opti.subject_to((x[0, k] - obstacle['centre'][0])**2 + (x[1, k] - obstacle['centre'][1])**2 >= obstacle['radius']**2)
+        # cost += z[:, k] * h
+        # opti.subject_to(z[:, k] >= u[0, k])
+        # opti.subject_to(z[:, k] >= -u[0, k])
 
-        # opti.subject_to(x_tot[0, k]**2 + x_tot[1, k]**2 >= 0.5)
-        # add dynamic constraints
+        cost += sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + 1e-6) # minimuse arc length
 
-        cost += sqrt( (x_tot[0, k+1] - x_tot[0, k])**2 + (x_tot[1, k+1] - x_tot[1, k])**2 + 1e-2) # minimuse arc length
-        x_tot_next = get_x_next(x_tot[:, k], u_tot[:, k], h)
-        opti.subject_to(x_tot[:, k+1] == x_tot_next)
+        x_next = get_x_next(x[:, k], u[:, k], h)
+        opti.subject_to(x[:, k+1] == x_next)
 
-    cost += (x_tot[0, -1] - x_target[0, -1])**2 + (x_tot[1, -1] - x_target[1, -1])**2 # + (x_tot[2, k] - x_target[2, -1])**2
-    # cost = (x_tot[0,K])**2 + (x_tot[1,K])**2
+    # cost += (x[0, -1] - x_target[0, -1])**2 + (x[1, -1] - x_target[1, -1])**2
+    opti.subject_to(x[0, -1] == x_target[0, -1])
+    opti.subject_to(x[1, -1] == x_target[1, -1])
 
     # constraints for every time step
-    opti.subject_to(opti.bounded(u1_min, u_tot[0,:], u1_max))
-    opti.subject_to(opti.bounded(u2_min, u_tot[1,:], u2_max))
-    # opti.subject_to(opti.bounded(x1_min, x_tot[0,:], x1_max))
-    # opti.subject_to(opti.bounded(x2_min, x_tot[1,:], x2_max))
+    opti.subject_to(opti.bounded(u1_min, u[0,:], u1_max))
+    opti.subject_to(opti.bounded(u2_min, u[1,:], u2_max))
 
     opts = {"ipopt.print_level": 5, "print_time": 0}
     # opts = {
@@ -72,12 +57,8 @@ def solve_OCP(x_hat, x_target, obstacles, K, h):
     opti.solver("ipopt", opts)
     
     solution = opti.solve()
-
-    # Get solution
-    x_opt = solution.value(x_tot)
-    u_opt = solution.value(u_tot)
-
-    # plot_solution(x_opt, u_opt.reshape(1,-1))
+    x_opt = solution.value(x)
+    u_opt = solution.value(u)
 
     return x_opt, u_opt
 
@@ -86,18 +67,18 @@ def f(x,u):
                    u[0]*sin(x[2]),
                    u[1])
 
-# def get_x_next(x, u, h):
-#     # RK4 step for car
-#     k1 = f(x,u)
-#     k2 = f(x + h*(k1/2), u)
-#     k3 = f(x + h*(k2/2), u)
-#     k4 = f(x + h*k3, u)
-
-#     return x + (h/6)*(k1 + 2*k2 + 2*k3 + k4)
-
 def get_x_next(x, u, h):
-    # Euler
-    return x + h*f(x,u)
+    # RK4 step for car
+    k1 = f(x,u)
+    k2 = f(x + h*(k1/2), u)
+    k3 = f(x + h*(k2/2), u)
+    k4 = f(x + h*k3, u)
+
+    return x + (h/6)*(k1 + 2*k2 + 2*k3 + k4)
+
+# def get_x_next(x, u, h):
+#     # Euler
+#     return x + h*f(x,u)
 
 def plot_constraints(ax, x_1_max, x_1_min, x2_init_min, x2_init_max):
     ax.plot([x_1_min, x_1_min], [x2_init_min, x2_init_max], 'k-')
