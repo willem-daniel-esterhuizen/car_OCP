@@ -1,27 +1,27 @@
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import numpy as np
-from casadi import *
+import casadi as ca
 
-def solve_OCP(x_hat, x_target, obstacles, K, h):
+def solve_OCP(x_init, x_target, obstacles, constraints, T, h):
     n = 3 # state dimension
     m = 2 # control dimension
 
-    no_steps = int(floor(K/h))
+    no_steps = int(ca.floor(T/h))
 
     # Constraints for all k
-    u1_max = 1
-    u1_min = -1
-    u2_max = 1
-    u2_min = -1
+    u1_max = constraints['u1_max']
+    u1_min = constraints['u1_min']
+    u2_max = constraints['u2_max']
+    u2_min = constraints['u2_min']
 
-    opti = Opti()
+    opti = ca.Opti()
     x = opti.variable(n, no_steps+1)  # State trajectory
     u = opti.variable(m, no_steps)    # Control trajectory
     # z = opti.variable(1, no_steps)
 
     # Specify the initial condition
-    opti.subject_to(x[:, 0] == x_hat)
+    opti.subject_to(x[:, 0] == x_init)
 
     cost = 0
     for k in range(no_steps):
@@ -31,7 +31,10 @@ def solve_OCP(x_hat, x_target, obstacles, K, h):
         # opti.subject_to(z[:, k] >= u[0, k])
         # opti.subject_to(z[:, k] >= -u[0, k])
 
-        cost += sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + 1e-6) # minimuse arc length
+        eps = 1e-2
+        eps_u = 1e-2
+        cost += (1/h) * ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps) \
+                + eps_u*(u[0, k]**2 + u[1, k]**2)
 
         x_next = get_x_next(x[:, k], u[:, k], h)
         opti.subject_to(x[:, k+1] == x_next)
@@ -53,8 +56,20 @@ def solve_OCP(x_hat, x_target, obstacles, K, h):
     #     "ipopt.bound_relax_factor": 1e-6,  # Slight bound relaxation
     #     "expand": True
     # }
+
+    # NEXT TIME: fix initial guess
+    initial_guess = get_initial_guess(x_init, x_target, no_steps)
+
+    opti.set_initial(x, np.vstack((initial_guess['x1_guess'],
+                                   initial_guess['x2_guess'],
+                                   initial_guess['x3_guess'])))
+    opti.set_initial(u, np.vstack((initial_guess['u1_guess'],
+                                   initial_guess['u2_guess'])))
+
     opti.minimize(cost)
     opti.solver("ipopt", opts)
+    
+
     
     solution = opti.solve()
     x_opt = solution.value(x)
@@ -62,10 +77,27 @@ def solve_OCP(x_hat, x_target, obstacles, K, h):
 
     return x_opt, u_opt
 
+def get_initial_guess(x_init, x_target, no_steps):
+    x1_guess = np.linspace(0, x_target[0], no_steps)
+    x2_guess = np.linspace(0, x_target[1], no_steps)
+    x3_guess = np.linspace(0, 0, no_steps)
+
+    u1_guess = np.ones(no_steps)
+    u2_guess = np.zeros(no_steps)
+
+    return {
+        'x1_guess' : x1_guess,
+        'x2_guess' : x2_guess,
+        'x3_guess' : x3_guess,
+        'u1_guess' : u1_guess,
+        'u2_guess' : u2_guess
+    }
+
+
 def f(x,u):
-    return vertcat(u[0]*cos(x[2]),
-                   u[0]*sin(x[2]),
-                   u[1])
+    return ca.vertcat(u[0]*ca.cos(x[2]),
+                      u[0]*ca.sin(x[2]),
+                      u[1])
 
 def get_x_next(x, u, h):
     # RK4 step for car
