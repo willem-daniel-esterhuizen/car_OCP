@@ -3,9 +3,11 @@ from matplotlib.ticker import MaxNLocator
 import numpy as np
 import casadi as ca
 
-def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, eps_u=1e-6, eps_cost=1e-6, sqrt_cost_flag=True):
+def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, eps_u=1e-3, eps_cost=1e-6):
     n = 3
     m = 2
+
+    cost_scaling = get_arc_length(x_target[0:2] - x_init[0:2])
 
     no_steps = int(ca.floor(T/h))
 
@@ -17,8 +19,6 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
     opti = ca.Opti()
     x = opti.variable(n, no_steps+1)
     u = opti.variable(m, no_steps)
-    if sqrt_cost_flag is False:
-        z = opti.variable(1, no_steps)    # If absolute value cost
 
     # Specify the initial condition
     opti.subject_to(x[:, 0] == x_init)
@@ -26,25 +26,22 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
     cost = 0
     for k in range(no_steps):
         for obstacle in obstacles:
-            opti.subject_to((x[0, k] - obstacle['centre'][0])**2 + (x[1, k] - obstacle['centre'][1])**2 >= obstacle['radius']**2)
-        
-        if sqrt_cost_flag is False:
-            cost += z[:, k] + eps_u*(u[0, k]**2 + u[1, k]**2)
-            opti.subject_to(z[:, k] >= np.sqrt(u[0, k]**2 + eps_cost) )
-        else:
-            cost += np.sqrt(eps_cost) * ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps_cost) + eps_u*(u[0, k]**2 + u[1, k]**2) )
-            # cost += ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps_cost) + eps_u*(u[0, k]**2 + u[1, k]**2) )
+            opti.subject_to(( (x[0, k] - obstacle['centre'][0]) / (cost_scaling) )**2 + ( (x[1, k] - obstacle['centre'][1]) / (cost_scaling) )**2 >= (obstacle['radius'] / (cost_scaling) )**2)
 
-        x_next = get_x_next(x[:, k], u[:, k], h)
-        opti.subject_to(x[:, k+1] == x_next)
-    # cost += 1e3*(x[0, -1] - x_target[0, -1])**2 + (x[1, -1] - x_target[1, -1])**2
+        opti.subject_to(x[:, k+1] == get_x_next(x[:, k], u[:, k], h))
+
+        cost += ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps_cost) - ca.sqrt(eps_cost) + eps_u*(u[0, k]**2 + u[1, k]**2) ) / (cost_scaling)
+
     opti.subject_to(x[0, -1] == x_target[0, -1])
     opti.subject_to(x[1, -1] == x_target[1, -1])
 
     opti.subject_to(opti.bounded(u1_min, u[0,:], u1_max))
     opti.subject_to(opti.bounded(u2_min, u[1,:], u2_max))
 
-    opts = {"ipopt.print_level": 5, "print_time": 1, "ipopt.sb": "yes"}
+    opts = {"ipopt.print_level": 5, 
+            "print_time": 1, 
+            "ipopt.sb": "yes",
+            "ipopt.nlp_scaling_method": "gradient-based"}
     # opts = {
     #     "ipopt.print_level": 5,
     #     "ipopt.tol": 1e-10,  # Tighter tolerance for precision
@@ -55,21 +52,29 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
     #     "ipopt.max_iter": 5000
     # }
 
-    if warm_start is not None:
-        opti.set_initial(u, np.vstack((warm_start['u1_warm'],
-                                       warm_start['u2_warm'])))
-        opti.set_initial(x, np.vstack((warm_start['x1_warm'],
-                                       warm_start['x2_warm'],
-                                       warm_start['x3_warm'])))
+    u_warm = np.vstack((warm_start['u1_warm'], 
+                        warm_start['u2_warm']))
+    x_warm = np.vstack((warm_start['x1_warm'],
+                        warm_start['x2_warm'],
+                        warm_start['x3_warm']))
 
 
     opti.minimize(cost)
     opti.solver("ipopt", opts)
 
-    # check_conditioning_sqrt_cost(opti, warm_start, no_steps, n, m)
-    # check_conditioning_abs_cost(opti, warm_start, no_steps, n, m)
+    # x0_vec = np.vstack((
+    #     x_warm.reshape(-1, 1),   # ← states first
+    #     u_warm.reshape(-1, 1)    # ← controls second
+    #     ))
+
+    # print_scaling_diagnostics(opti, x0_vec)
 
     solution = opti.solve()
+
+    # x0_vec = opti.debug.value(opti.x)
+
+    # print_scaling_diagnostics(opti, x0_vec)
+
     x_opt = solution.value(x)
     u_opt = solution.value(u)
 
@@ -77,8 +82,8 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
 
 def get_initial_warm_start(x_init, x_target, T, h):
     no_steps = int(ca.floor(T/h))
-    x1_warm = np.linspace(0, x_target[0][0], no_steps + 1)
-    x2_warm = np.linspace(0, x_target[1][0], no_steps + 1)
+    x1_warm = np.linspace(x_init[0][0], x_target[0][0], no_steps + 1)
+    x2_warm = np.linspace(x_init[1][0], x_target[1][0], no_steps + 1)
     x3_warm = np.linspace(0, 0, no_steps + 1)
 
     u1_warm = 0.1*np.ones(no_steps)
@@ -92,66 +97,26 @@ def get_initial_warm_start(x_init, x_target, T, h):
         'u2_warm' : u2_warm
     }
 
-def check_conditioning_abs_cost(opti, warm_start, no_steps, n, m):
-    G = opti.g
-    F = opti.f
-    X = opti.x
+def print_scaling_diagnostics(opti, x0_vec):
+    f  = opti.f
+    g  = opti.g
+    x  = opti.x
+    J  = ca.jacobian(g, x)
+    H  = ca.hessian(f, x)[0]
+    gradf = ca.jacobian(f, x)
 
-    print("Number of decision variables:", X.shape)
-    print("Number of constraints:", G.shape)
+    fun = ca.Function('diag',[x],[f,g,J,H,gradf])
+    f0,g0,J0,H0,gradf0 = fun(x0_vec)
 
-    # Convert to callable CasADi function
-    J = ca.jacobian(G, X)
-    H = ca.hessian(F, X)[0]
-
-    nlp_fun = ca.Function(
-        "nlp_fun",
-        [X],  # inputs: decision vector
-        [F, G, J, H]
-    )
-    u0 = np.vstack((warm_start['u1_warm'],
-                    warm_start['u2_warm']))
-    x0 = np.vstack((warm_start['x1_warm'],
-                    warm_start['x2_warm'],
-                    warm_start['x3_warm']))
-    z0 = np.ones(no_steps)
-    X0 = np.vstack((u0.reshape(m*no_steps,1), x0.reshape(n*(no_steps+1),1), z0.reshape(1*(no_steps),1)))
-    f0, g0, J0, H0 = nlp_fun(X0)
-
-    print("Objective (f) magnitude:", float(abs(f0)))
-    print("Constraint (g) range: [", float(np.min(g0)), ",", float(np.max(g0)), "]")
-    print("Jacobian (∂g/∂x) coefficient range: [", np.min(J0), ",", np.max(J0), "]")
-    print("Hessian (∂²f/∂x²) coefficient range: [", np.min(H0), ",", np.max(H0), "]")
-
-def check_conditioning_sqrt_cost(opti, warm_start, no_steps, n, m):
-    G = opti.g
-    F = opti.f
-    X = opti.x
-
-    print("Number of decision variables:", X.shape)
-    print("Number of constraints:", G.shape)
-
-    # Convert to callable CasADi function
-    J = ca.jacobian(G, X)
-    H = ca.hessian(F, X)[0]
-
-    nlp_fun = ca.Function(
-        "nlp_fun",
-        [X],  # inputs: decision vector
-        [F, G, J, H]
-    )
-    u0 = np.vstack((warm_start['u1_warm'],
-                    warm_start['u2_warm']))
-    x0= np.vstack((warm_start['x1_warm'],
-                    warm_start['x2_warm'],
-                    warm_start['x3_warm']))
-    X0 = np.vstack((u0.reshape(m*no_steps,1),x0.reshape(n*(no_steps+1),1)))
-    f0, g0, J0, H0 = nlp_fun(X0)
-
-    print("Objective (f) magnitude:", float(abs(f0)))
-    print("Constraint (g) range: [", float(np.min(g0)), ",", float(np.max(g0)), "]")
-    print("Jacobian (∂g/∂x) coefficient range: [", np.min(J0), ",", np.max(J0), "]")
-    print("Hessian (∂²f/∂x²) coefficient range: [", np.min(H0), ",", np.max(H0), "]")
+    print("=== SCALING DIAGNOSTICS ===")
+    print(f"Objective f          : {float(f0):.3e}")
+    print(f"||g||_inf            : {float(ca.norm_inf(g0)):.3e}")
+    print(f"||J||_Frob           : {float(ca.norm_fro(J0)):.3e}")
+    print(f"||J||_inf            : {float(ca.norm_inf(J0)):.3e}")
+    print(f"||H||_Frob           : {float(ca.norm_fro(H0)):.3e}")
+    print(f"||∇f||_inf           : {float(ca.norm_inf(gradf0)):.3e}")
+    print(f"||∇f||_2             : {float(ca.norm_2(gradf0)):.3e}")
+    print("============================")
 
 def get_arc_length(x):
     arc_length = 0
@@ -173,14 +138,9 @@ def get_x_next(x, u, h):
 
     return x + (h/6)*(k1 + 2*k2 + 2*k3 + k4)
 
-# def get_x_next(x, u, h):
-#     # Euler
-#     return x + h*f(x,u)
-
 def plot_constraints(ax, x_1_max, x_1_min, x2_init_min, x2_init_max):
     ax.plot([x_1_min, x_1_min], [x2_init_min, x2_init_max], 'k-')
     ax.plot([x_1_max, x_1_max], [x2_init_min, x2_init_max], 'k-')
-
 
 def plot_solution_hold_on(ax, x_tot):
     x_1 = x_tot[0]
