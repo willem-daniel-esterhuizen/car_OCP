@@ -3,11 +3,11 @@ from matplotlib.ticker import MaxNLocator
 import numpy as np
 import casadi as ca
 
-def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, eps_u=1e-3, eps_cost=1e-6):
+def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, eps=1e-4, delta=1e-3):
     n = 3
     m = 2
 
-    cost_scaling = get_arc_length(x_target[0:2] - x_init[0:2])
+    cost_scaling = get_arc_length(np.hstack((x_init[0:2], x_target[0:2])))
 
     no_steps = int(ca.floor(T/h))
 
@@ -30,7 +30,7 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
 
         opti.subject_to(x[:, k+1] == get_x_next(x[:, k], u[:, k], h))
 
-        cost += ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps_cost) - ca.sqrt(eps_cost) + eps_u*(u[0, k]**2 + u[1, k]**2) ) / (cost_scaling)
+        cost += ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps) + delta*(u[0, k]**2 + u[1, k]**2) ) / (cost_scaling)
 
     opti.subject_to(x[0, -1] == x_target[0, -1])
     opti.subject_to(x[1, -1] == x_target[1, -1])
@@ -38,8 +38,8 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
     opti.subject_to(opti.bounded(u1_min, u[0,:], u1_max))
     opti.subject_to(opti.bounded(u2_min, u[1,:], u2_max))
 
-    opts = {"ipopt.print_level": 5, 
-            "print_time": 1, 
+    opts = {"ipopt.print_level": 0, 
+            "print_time": 0, 
             "ipopt.sb": "yes",
             "ipopt.nlp_scaling_method": "gradient-based"}
     # opts = {
@@ -52,11 +52,7 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
     #     "ipopt.max_iter": 5000
     # }
 
-    u_warm = np.vstack((warm_start['u1_warm'], 
-                        warm_start['u2_warm']))
-    x_warm = np.vstack((warm_start['x1_warm'],
-                        warm_start['x2_warm'],
-                        warm_start['x3_warm']))
+
 
 
     opti.minimize(cost)
@@ -68,6 +64,15 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
     #     ))
 
     # print_scaling_diagnostics(opti, x0_vec)
+
+    # u_warm = np.vstack((warm_start['u1_warm'], 
+    #                     warm_start['u2_warm']))
+    # x_warm = np.vstack((warm_start['x1_warm'],
+    #                     warm_start['x2_warm'],
+    #                     warm_start['x3_warm']))
+
+    # opti.set_initial(x, x_warm)
+    # opti.set_initial(u, u_warm)
 
     solution = opti.solve()
 
@@ -87,7 +92,7 @@ def get_initial_warm_start(x_init, x_target, T, h):
     x3_warm = np.linspace(0, 0, no_steps + 1)
 
     u1_warm = 0.1*np.ones(no_steps)
-    u2_warm = 0.1**np.ones(no_steps)
+    u2_warm = np.zeros(no_steps)
 
     return {
         'x1_warm' : x1_warm,
@@ -119,9 +124,10 @@ def print_scaling_diagnostics(opti, x0_vec):
     print("============================")
 
 def get_arc_length(x):
+
     arc_length = 0
-    for k in range(x.shape[1]):
-        arc_length += np.linalg.norm(x[:, k])
+    for k in range(1, x.shape[1]):
+        arc_length += np.linalg.norm(x[:2, k] - x[:2, k - 1])
     return arc_length
 
 def f(x,u):
@@ -219,22 +225,40 @@ def plot_solution_versus_time(x_tot, u_tot):
     # plt.savefig("ocp-open-loop.svg", format="svg")
     plt.show()
 
-def plot_solution_in_state_space(x_tot, obstacles, title):
+def plot_solution_in_state_space(x_tot, obstacles, title, arc_length, obstacles_only=False):
     x1 = x_tot[0]
     x2 = x_tot[1]
-    x3 = x_tot[2]
     fig = plt.figure(figsize=(8, 8))
     gs_position_space = fig.add_gridspec(1, 1)
     ax6 = fig.add_subplot(gs_position_space[0])
     ax6.set_title(title, fontsize=14)
-    ax6.plot(x1, x2, 'k-')
     ax6.set_xlabel('x1')
     ax6.set_ylabel('x2')
     ax6.grid(True)
     ax6.set_aspect('equal')
 
+    if obstacles_only is False:
+        ax6.plot(x1, x2, 'k-')
+
     # Plot the initial and final states
     ax6.plot([x1[0], x1[-1]], [x2[0], x2[-1]], 'k.')
+    epsilon=0.05
+    ax6.annotate(
+        r'$\mathbf{x}^{\mathrm{ini}}$',
+        xy=(x1[0], x2[0] + epsilon),
+        xytext=(x1[0], x2[0] + epsilon)
+    )
+    ax6.annotate(
+        r'$\mathbf{x}^{\mathrm{tar}}$',
+        xy=(x1[-1] - 2*epsilon, x2[-1] + epsilon),
+        xytext=(x1[-1] - 2*epsilon, x2[-1] + epsilon)
+    )
+
+    ax6.annotate(
+        f'Arc length: {arc_length}',
+        xy=(-2, 0.7),
+        xytext=(-2, 0.7)
+    )    
 
     # Plot the obstacles
     theta = np.linspace(0, 2*np.pi, 50)
@@ -246,7 +270,7 @@ def plot_solution_in_state_space(x_tot, obstacles, title):
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 def plot_control(u_tot):
-    fig = plt.figure(figsize=(8, 8))
+    fig = plt.figure(figsize=(8, 6))
     gs = fig.add_gridspec(2, 1)
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1], sharex=ax1)

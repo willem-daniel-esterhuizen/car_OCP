@@ -1,5 +1,5 @@
 import numpy as np
-from car_OCP import solve_OCP, get_initial_warm_start, get_arc_length, plot_control_and_state_space
+from car_OCP import solve_OCP, get_initial_warm_start, get_arc_length, plot_solution_in_state_space, plot_control, get_arc_length
 
 if __name__ == "__main__":
     x_init = np.array([[2],[0],[np.pi/2]])
@@ -27,19 +27,11 @@ if __name__ == "__main__":
     }
 
     warm_start = get_initial_warm_start(x_init, x_target, T, h)
-    for eps in [1e-6]:
-        ** take smaller steps... **
-        eps_cost=eps
-        eps_u=0
-        print('////////////////////////////')
-        print(f'eps_cost: {eps_cost}. eps_u: {eps_u}')
-        print('////////////////////////////')
-        eps_cost=eps_cost
-        eps_u=eps_u
-        x_opt, u_opt = solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start, eps_u=eps_u, eps_cost=eps_cost)
 
-        # print(f'///////// arc length: {get_arc_length(x_opt)} //////////')
-        # plot_control_and_state_space(u_opt, x_opt, obstacles)
+    eps_init = 1e-2
+    for i in range(20):
+        eps = eps_init/(2**i)
+        x_opt, u_opt = solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start, eps=eps, delta=1e-4)
 
         warm_start = {
             'x1_warm': x_opt[0,:],
@@ -48,8 +40,10 @@ if __name__ == "__main__":
             'u1_warm': u_opt[0,:],
             'u2_warm': u_opt[1,:]
         }
+        # plot_solution_in_state_space(x_opt, obstacles, 'State Space', arc_length=np.round(get_arc_length(x_opt), 2), obstacles_only=False)
+        # plot_control(u_opt)
 
-    print(f'///////// arc length: {get_arc_length(x_opt)} //////////')
-    plot_control_and_state_space(u_opt, x_opt, obstacles)
-    
-    'stop'
+        print(f'///// eps: {eps}, arc length: {get_arc_length(x_opt)}')
+
+    plot_solution_in_state_space(x_opt, obstacles, 'State Space', arc_length=np.round(get_arc_length(x_opt), 2), obstacles_only=False)
+    plot_control(u_opt)
