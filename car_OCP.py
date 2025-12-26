@@ -2,12 +2,15 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 import casadi as ca
+import matplotlib.animation as animation
+from matplotlib.patches import FancyArrowPatch
+# from IPython.display import HTML
 
-def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, eps_u=1e-3, eps_cost=1e-6):
+def build_and_check_scaling(x_init, x_target, obstacles, constraints, T, h, warm_start, eps=1e-4, delta=1e-3):
     n = 3
     m = 2
 
-    cost_scaling = get_arc_length(x_target[0:2] - x_init[0:2])
+    cost_scaling = get_arc_length(np.hstack((x_init[0:2], x_target[0:2])))
 
     no_steps = int(ca.floor(T/h))
 
@@ -30,7 +33,7 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
 
         opti.subject_to(x[:, k+1] == get_x_next(x[:, k], u[:, k], h))
 
-        cost += ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps_cost) - ca.sqrt(eps_cost) + eps_u*(u[0, k]**2 + u[1, k]**2) ) / (cost_scaling)
+        cost += ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps) + delta*(u[0, k]**2 + u[1, k]**2) ) / (cost_scaling)
 
     opti.subject_to(x[0, -1] == x_target[0, -1])
     opti.subject_to(x[1, -1] == x_target[1, -1])
@@ -38,42 +41,71 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
     opti.subject_to(opti.bounded(u1_min, u[0,:], u1_max))
     opti.subject_to(opti.bounded(u2_min, u[1,:], u2_max))
 
-    opts = {"ipopt.print_level": 5, 
-            "print_time": 1, 
-            "ipopt.sb": "yes",
-            "ipopt.nlp_scaling_method": "gradient-based"}
-    # opts = {
-    #     "ipopt.print_level": 5,
-    #     "ipopt.tol": 1e-10,  # Tighter tolerance for precision
-    #     "ipopt.mu_strategy": "adaptive",  # Better barrier handling
-    #     "ipopt.hessian_approximation": "limited-memory",  # For large problems
-    #     "ipopt.bound_relax_factor": 1e-6,  # Slight bound relaxation
-    #     "expand": True,
-    #     "ipopt.max_iter": 5000
-    # }
+    opti.minimize(cost)
 
     u_warm = np.vstack((warm_start['u1_warm'], 
                         warm_start['u2_warm']))
     x_warm = np.vstack((warm_start['x1_warm'],
                         warm_start['x2_warm'],
                         warm_start['x3_warm']))
+    
+    x0_vec = ca.vertcat(ca.vec(x_warm), ca.vec(u_warm))
+    print_scaling_diagnostics(opti, x0_vec)
 
+def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, eps=1e-4, delta=1e-3):
+    n = 3
+    m = 2
+
+    cost_scaling = get_arc_length(np.hstack((x_init[0:2], x_target[0:2])))
+
+    no_steps = int(ca.floor(T/h))
+
+    u1_max = constraints['u1_max']
+    u1_min = constraints['u1_min']
+    u2_max = constraints['u2_max']
+    u2_min = constraints['u2_min']
+
+    opti = ca.Opti()
+    x = opti.variable(n, no_steps+1)
+    u = opti.variable(m, no_steps)
+
+    # Specify the initial condition
+    opti.subject_to(x[:, 0] == x_init)
+
+    cost = 0
+    for k in range(no_steps):
+        for obstacle in obstacles:
+            opti.subject_to(( (x[0, k] - obstacle['centre'][0]) / (cost_scaling) )**2 + ( (x[1, k] - obstacle['centre'][1]) / (cost_scaling) )**2 >= (obstacle['radius'] / (cost_scaling) )**2)
+
+        opti.subject_to(x[:, k+1] == get_x_next(x[:, k], u[:, k], h))
+
+        cost += ( ca.sqrt( (x[0, k+1] - x[0, k])**2 + (x[1, k+1] - x[1, k])**2 + eps) + delta*(u[0, k]**2 + u[1, k]**2) ) / (cost_scaling)
+
+    opti.subject_to(x[0, -1] == x_target[0, -1])
+    opti.subject_to(x[1, -1] == x_target[1, -1])
+
+    opti.subject_to(opti.bounded(u1_min, u[0,:], u1_max))
+    opti.subject_to(opti.bounded(u2_min, u[1,:], u2_max))
+
+    opts = {"ipopt.print_level": 0, 
+            "print_time": 0, 
+            "ipopt.sb": "yes",
+            "ipopt.nlp_scaling_method": "gradient-based"}
 
     opti.minimize(cost)
     opti.solver("ipopt", opts)
 
-    # x0_vec = np.vstack((
-    #     x_warm.reshape(-1, 1),   # ← states first
-    #     u_warm.reshape(-1, 1)    # ← controls second
-    #     ))
+    if warm_start is not None:
+        u_warm = np.vstack((warm_start['u1_warm'], 
+                            warm_start['u2_warm']))
+        x_warm = np.vstack((warm_start['x1_warm'],
+                            warm_start['x2_warm'],
+                            warm_start['x3_warm']))
 
-    # print_scaling_diagnostics(opti, x0_vec)
+        opti.set_initial(x, x_warm)
+        opti.set_initial(u, u_warm)
 
     solution = opti.solve()
-
-    # x0_vec = opti.debug.value(opti.x)
-
-    # print_scaling_diagnostics(opti, x0_vec)
 
     x_opt = solution.value(x)
     u_opt = solution.value(u)
@@ -82,12 +114,13 @@ def solve_OCP(x_init, x_target, obstacles, constraints, T, h, warm_start=None, e
 
 def get_initial_warm_start(x_init, x_target, T, h):
     no_steps = int(ca.floor(T/h))
+
     x1_warm = np.linspace(x_init[0][0], x_target[0][0], no_steps + 1)
     x2_warm = np.linspace(x_init[1][0], x_target[1][0], no_steps + 1)
     x3_warm = np.linspace(0, 0, no_steps + 1)
 
     u1_warm = 0.1*np.ones(no_steps)
-    u2_warm = 0.1**np.ones(no_steps)
+    u2_warm = np.zeros(no_steps)
 
     return {
         'x1_warm' : x1_warm,
@@ -98,30 +131,35 @@ def get_initial_warm_start(x_init, x_target, T, h):
     }
 
 def print_scaling_diagnostics(opti, x0_vec):
-    f  = opti.f
-    g  = opti.g
-    x  = opti.x
-    J  = ca.jacobian(g, x)
-    H  = ca.hessian(f, x)[0]
-    gradf = ca.jacobian(f, x)
+    f = opti.f       # objective (scalar)
+    g = opti.g       # constraints (vector)
+    x = opti.x       # decision variables
 
-    fun = ca.Function('diag',[x],[f,g,J,H,gradf])
-    f0,g0,J0,H0,gradf0 = fun(x0_vec)
+    grad_f = ca.jacobian(f, x)           # ∇f (row vector)
+    jac_g  = ca.jacobian(g, x)           # Jacobian of constraints
+    hess_f = ca.hessian(f, x)[0]         # Hessian of objective (Lagrangian approx if bounds)
+
+    diag_fun = ca.Function('diag', [x], [f, g, grad_f, jac_g, hess_f])
+
+    f0, g0, grad_f0, jac_g0, hess_f0 = diag_fun(x0_vec)
 
     print("=== SCALING DIAGNOSTICS ===")
-    print(f"Objective f          : {float(f0):.3e}")
-    print(f"||g||_inf            : {float(ca.norm_inf(g0)):.3e}")
-    print(f"||J||_Frob           : {float(ca.norm_fro(J0)):.3e}")
-    print(f"||J||_inf            : {float(ca.norm_inf(J0)):.3e}")
-    print(f"||H||_Frob           : {float(ca.norm_fro(H0)):.3e}")
-    print(f"||∇f||_inf           : {float(ca.norm_inf(gradf0)):.3e}")
-    print(f"||∇f||_2             : {float(ca.norm_2(gradf0)):.3e}")
+    print(f"Objective J          : {float(f0):.3e}")
+    # print(f"||∇J||_inf           : {float(ca.norm_inf(grad_f0)):.3e}")
+    print(f"||∇J||_2             : {float(ca.norm_2(grad_f0)):.3e}")
+    print(f"||Hess J||_Frob      : {float(ca.norm_fro(hess_f0)):.3e}")
+    # print(f"||Hess J||_inf       : {float(ca.norm_inf(hess_f0)):.3e}")
+    # print(f"||g||_inf            : {float(ca.norm_inf(g0)):.3e}")
+    print(f"||g||_2              : {float(ca.norm_2(g0)):.3e}")
+    print(f"||Jac g||_Frob       : {float(ca.norm_fro(jac_g0)):.3e}")
+    # print(f"||Jac g||_inf        : {float(ca.norm_inf(jac_g0)):.3e}")
     print("============================")
 
 def get_arc_length(x):
+
     arc_length = 0
-    for k in range(x.shape[1]):
-        arc_length += np.linalg.norm(x[:, k])
+    for k in range(1, x.shape[1]):
+        arc_length += np.linalg.norm(x[:2, k] - x[:2, k - 1])
     return arc_length
 
 def f(x,u):
@@ -219,22 +257,49 @@ def plot_solution_versus_time(x_tot, u_tot):
     # plt.savefig("ocp-open-loop.svg", format="svg")
     plt.show()
 
-def plot_solution_in_state_space(x_tot, obstacles, title):
+def plot_solution_in_state_space(x_tot, obstacles, title, arc_length, obstacles_only=False, eps=None, delta=None):
     x1 = x_tot[0]
     x2 = x_tot[1]
-    x3 = x_tot[2]
-    fig = plt.figure(figsize=(8, 8))
+    fig = plt.figure(figsize=(7, 7))
     gs_position_space = fig.add_gridspec(1, 1)
     ax6 = fig.add_subplot(gs_position_space[0])
     ax6.set_title(title, fontsize=14)
-    ax6.plot(x1, x2, 'k-')
     ax6.set_xlabel('x1')
     ax6.set_ylabel('x2')
     ax6.grid(True)
     ax6.set_aspect('equal')
 
+    if obstacles_only is False:
+        ax6.plot(x1, x2, 'k-')
+
     # Plot the initial and final states
     ax6.plot([x1[0], x1[-1]], [x2[0], x2[-1]], 'k.')
+    epsilon=0.05
+    ax6.annotate(
+        r'$\mathbf{x}^{\mathrm{ini}}$',
+        xy=(x1[0], x2[0] + epsilon),
+        xytext=(x1[0], x2[0] + epsilon)
+    )
+    ax6.annotate(
+        r'$\mathbf{x}^{\mathrm{tar}}$',
+        xy=(x1[-1] - 2*epsilon, x2[-1] + epsilon),
+        xytext=(x1[-1] - 2*epsilon, x2[-1] + epsilon)
+    )
+    ax6.annotate(
+        f'Arc length: {arc_length}',
+        xy=(-2, 0.7),
+        xytext=(-2, 0.7)
+    )
+    ax6.annotate(
+        rf'$\varepsilon$: {eps}',
+        xy=(-2, 0.6),
+        xytext=(-2, 0.6)
+    )
+    ax6.annotate(
+        rf'$\delta$: {delta}',
+        xy=(-2, 0.5),
+        xytext=(-2, 0.5)
+    ) 
 
     # Plot the obstacles
     theta = np.linspace(0, 2*np.pi, 50)
@@ -246,7 +311,7 @@ def plot_solution_in_state_space(x_tot, obstacles, title):
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
 def plot_control(u_tot):
-    fig = plt.figure(figsize=(8, 8))
+    fig = plt.figure(figsize=(7, 5))
     gs = fig.add_gridspec(2, 1)
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
@@ -260,51 +325,111 @@ def plot_control(u_tot):
     ax1.set_xlabel('Time step')
     ax1.legend()
     ax1.grid(True)
+    ax1.set_ylim(top=1.1, bottom=-1.1)
+
     ax2.step(time, np.append(u2[0], u2), 'g-', label='u2 (turning rate)')
     ax2.set_title("u_2 vs time", fontsize=14)
     ax2.set_xlabel('Time step')
     ax2.legend()
     ax2.grid(True)
+    ax1.set_ylim(top=1.1, bottom=-1.1)
+
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     plt.show()
 
-def plot_control_and_state_space(u_tot, x_tot, obstacles):
-    fig = plt.figure(figsize=(8, 8))
-    gs = fig.add_gridspec(3, 1)
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1])
-    ax3 = fig.add_subplot(gs[2], sharex=ax2)
-
+def plot_solution_in_statespace_and_control(x_tot, u_tot, obstacles, arc_length, obstacles_only=False, eps=None, delta=None):
     x1 = x_tot[0]
     x2 = x_tot[1]
-    ax1.plot(x1, x2, 'k-')
-    ax1.set_xlabel('x1')
-    ax1.set_ylabel('x2')
-    ax1.plot([x1[0], x1[-1]], [x2[0], x2[-1]], 'k.')
-    ax1.grid(True)
-    ax1.set_aspect('equal')
-    ax1.set_title('State space')
+    fig = plt.figure(figsize=(7, 9))
+    gs_position_space = fig.add_gridspec(3, 1, height_ratios=[2, 1, 1])
+    ax6 = fig.add_subplot(gs_position_space[0])
+    ax6.set_title('State space', fontsize=14)
+    ax6.set_xlabel('x1')
+    ax6.set_ylabel('x2')
+    ax6.grid(True)
+    ax6.set_aspect('equal')
 
+    if obstacles_only is False:
+        ax6.plot(x1, x2, 'k-')
+
+    # Plot the initial and final states
+    ax6.plot([x1[0], x1[-1]], [x2[0], x2[-1]], 'k.')
+    epsilon=0.05
+    ax6.annotate(
+        r'$\mathbf{x}^{\mathrm{ini}}$',
+        xy=(x1[0], x2[0] + epsilon),
+        xytext=(x1[0], x2[0] + epsilon)
+    )
+    ax6.annotate(
+        r'$\mathbf{x}^{\mathrm{tar}}$',
+        xy=(x1[-1] - 2*epsilon, x2[-1] + epsilon),
+        xytext=(x1[-1] - 2*epsilon, x2[-1] + epsilon)
+    )
+    ax6.annotate(
+        f'Arc length: {arc_length}',
+        xy=(-2, 0.7),
+        xytext=(-2, 0.7)
+    )
+    ax6.annotate(
+        rf'$\varepsilon$: {eps}',
+        xy=(-2, 0.6),
+        xytext=(-2, 0.6)
+    )
+    ax6.annotate(
+        rf'$\delta$: {delta}',
+        xy=(-2, 0.5),
+        xytext=(-2, 0.5)
+    ) 
+
+    # Plot the obstacles
     theta = np.linspace(0, 2*np.pi, 50)
     for obstacle in obstacles:
         x = obstacle['centre'][0] + obstacle['radius'] * np.cos(theta)
         y = obstacle['centre'][1] + obstacle['radius'] * np.sin(theta)
-        ax1.plot(x, y, 'k-')
+        ax6.plot(x, y, 'k-')
 
+    ax1 = fig.add_subplot(gs_position_space[1])
+    ax2 = fig.add_subplot(gs_position_space[2], sharex=ax1)
+
+    # Plot control versus time
     u1 = u_tot[0]
     u2 = u_tot[1]
     time = np.arange(u_tot.shape[1] + 1)
-    ax2.step(time, np.append(u1[0], u1), 'g-', label='u1 (velocity)')
-    ax2.set_title("u_1 vs time", fontsize=14)
+    ax1.step(time, np.append(u1[0], u1), 'g-', label='u1 (velocity)')
+    ax1.set_title("u1 vs time", fontsize=14)
+    ax1.set_xlabel('Time step')
+    ax1.legend()
+    ax1.grid(True)
+    ax1.set_ylim(top=1.1, bottom=-1.1)
+
+    ax2.step(time, np.append(u2[0], u2), 'g-', label='u2 (turning rate)')
+    ax2.set_title("u2 vs time", fontsize=14)
     ax2.set_xlabel('Time step')
     ax2.legend()
     ax2.grid(True)
-    ax3.step(time, np.append(u2[0], u2), 'g-', label='u2 (turning rate)')
-    ax3.set_title("u_2 vs time", fontsize=14)
-    ax3.set_xlabel('Time step')
-    ax3.legend()
-    ax3.grid(True)
+    ax1.set_ylim(top=1.1, bottom=-1.1)
+
     fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    plt.show()
+
+def plot_arclength_vs_i(arc_lengths_with_homo, arc_lengths_no_homo):
+    fig = plt.figure(figsize=(9, 5))
+
+    gs = fig.add_gridspec(1, 1)
+    ax1 = fig.add_subplot(gs[0])
+    ax1.plot(arc_lengths_with_homo, color='blue', marker='o', label='With homotopy')
+    ax1.plot(arc_lengths_no_homo, color='red', marker='o', label='Without homotopy')
+    ax1.legend()
+    ax1.grid(True)
+
+    ax1.set_xticks(range(len(arc_lengths_no_homo)))
+    xlabels = [rf'$\frac{{0.01}}{{2^{{{i}}}}}$' for i in range(len(arc_lengths_no_homo))]
+    ax1.set_xticklabels(xlabels)
+
+    ax1.set_title(r'Arc length of solution versus $\varepsilon$')
+    ax1.set_xlabel(r'$\varepsilon$')
+    ax1.set_ylabel('arc length')
 
     plt.show()
