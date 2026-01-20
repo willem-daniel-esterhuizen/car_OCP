@@ -1,0 +1,1 @@
+Code from the article "Optimal Path Planning for Wheeled Robots" at https://topicsincontrol.com/, which also appears under the title "Overcoming Nonsmoothness and Control Chattering in Nonconvex Optimal Control Problems" at https://towardsdatascience.com/optimal-path-planning-for-wheeled-robots/
